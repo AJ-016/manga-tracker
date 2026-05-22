@@ -582,3 +582,19 @@ body {
   background: var(--danger);
   border-color: transparent;
 }
+
+/* Dynamic Drag and Drop UI States */
+.file-upload-wrapper.drag-active,
+.edit-file-wrapper.drag-active {
+  border: 2px dashed var(--accent-neon) !important;
+  background: rgba(99, 102, 241, 0.08) !important;
+  transform: scale(1.01);
+  box-shadow: 0 0 15px rgba(99, 102, 241, 0.25);
+}
+
+.file-upload-wrapper.drag-active .file-label,
+.edit-file-wrapper.drag-active .edit-file-label {
+  color: var(--accent-neon);
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}

@@ -22,17 +22,19 @@ function App() {
   const [coverUrl, setCoverUrl] = useState('')
   const [uploading, setUploading] = useState(false)
 
+  // Drag and Drop States
+  const [isDraggingMain, setIsDraggingMain] = useState(false)
+  const [draggingCardTitle, setDraggingCardTitle] = useState(null)
+
   // Inline Edit Mode Trackers
   const [editingTitle, setEditingTitle] = useState(null)
   const [editFields, setEditFields] = useState({ title: '', type: '', current_chapter: 0, status: '', cover_url: '' })
 
   useEffect(() => {
-    // Check initial auth session status
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
     })
 
-    // Listen for authentication changes (login, logout, signup)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session)
     })
@@ -86,13 +88,11 @@ function App() {
     }
   }
 
-  // Helper: Extract unique storage filename from a public asset URL
   function getFilenameFromUrl(url) {
     if (!url || !url.includes('/storage/v1/object/public/covers/')) return null
     return url.split('/storage/v1/object/public/covers/').pop()
   }
 
-  // Helper: Hard-purge an asset from the storage bucket
   async function deleteStorageFile(filename) {
     if (!filename) return
     try {
@@ -104,14 +104,11 @@ function App() {
     }
   }
 
-  // Compress photo and stream it into user-scoped bucket folders
   async function uploadCoverImage(file) {
     try {
       setUploading(true)
       const options = { maxSizeMB: 0.05, maxWidthOrHeight: 500, useWebWorker: true, fileType: 'image/webp' }
       const compressedFile = await imageCompression(file, options)
-      
-      // Organize storage folders by using the user's ID
       const fileName = `${session.user.id}/${Date.now()}.webp`
 
       const { error: uploadError } = await supabase.storage
@@ -130,6 +127,66 @@ function App() {
     }
   }
 
+  // --- Drag & Drop Event Core Handlers ---
+  function handleDragOver(e, type, title = null) {
+    e.preventDefault()
+    if (type === 'main') {
+      setIsDraggingMain(true)
+    } else if (type === 'card') {
+      setDraggingCardTitle(title)
+    }
+  }
+
+  function handleDragLeave(e, type) {
+    e.preventDefault()
+    if (type === 'main') {
+      setIsDraggingMain(false)
+    } else if (type === 'card') {
+      setDraggingCardTitle(null)
+    }
+  }
+
+  async function handleDropMain(e) {
+    e.preventDefault()
+    setIsDraggingMain(false)
+    
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
+    const file = e.dataTransfer.files[0]
+    
+    if (!file.type.startsWith('image/')) {
+      alert('Please drop an image file only!')
+      return
+    }
+
+    if (coverUrl) {
+      const oldFilename = getFilenameFromUrl(coverUrl)
+      if (oldFilename) await deleteStorageFile(oldFilename)
+    }
+    const publicUrl = await uploadCoverImage(file)
+    if (publicUrl) setCoverUrl(publicUrl)
+  }
+
+  async function handleDropEdit(e) {
+    e.preventDefault()
+    setDraggingCardTitle(null)
+
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
+    const file = e.dataTransfer.files[0]
+
+    if (!file.type.startsWith('image/')) {
+      alert('Please drop an image file only!')
+      return
+    }
+
+    if (editFields.cover_url && editFields.cover_url !== mangaList.find(i => i.title === editingTitle)?.cover_url) {
+      const oldFilename = getFilenameFromUrl(editFields.cover_url)
+      if (oldFilename) await deleteStorageFile(oldFilename)
+    }
+    const publicUrl = await uploadCoverImage(file)
+    if (publicUrl) setEditFields({ ...editFields, cover_url: publicUrl })
+  }
+
+  // --- Native Input Click File Handlers ---
   async function handleMainFileChange(e) {
     if (!e.target.files || e.target.files.length === 0) return
     const file = e.target.files[0]
@@ -163,7 +220,7 @@ function App() {
           current_chapter: parseFloat(chapter) || 0,
           status,
           cover_url: coverUrl || null,
-          user_id: session.user.id // Assigns row ownership to current user profile ID
+          user_id: session.user.id
         }
       ])
       if (error) throw error
@@ -242,7 +299,6 @@ function App() {
     }
   }
 
-  // Auth Gateway View
   if (!session) {
     return (
       <div className="auth-wrapper">
@@ -303,9 +359,14 @@ function App() {
             required 
             className="neon-input"
           />
-          <div className="file-upload-wrapper neon-input">
+          <div 
+            className={`file-upload-wrapper neon-input ${isDraggingMain ? 'drag-active' : ''}`}
+            onDragOver={(e) => handleDragOver(e, 'main')}
+            onDragLeave={(e) => handleDragLeave(e, 'main')}
+            onDrop={handleDropMain}
+          >
             <label htmlFor="main-file-input" className="file-label">
-              {uploading ? 'Optimizing...' : coverUrl ? '✓ Ready to Track' : '📁 Upload Cover Photo'}
+              {uploading ? 'Optimizing...' : isDraggingMain ? '💥 Drop Image Here!' : coverUrl ? '✓ Cover Loaded' : '📁 Upload or Drag Cover'}
             </label>
             <input 
               id="main-file-input"
@@ -353,6 +414,7 @@ function App() {
           ) : (
             mangaList.map((item) => {
               const isEditing = editingTitle === item.title
+              const isDraggingOnCard = draggingCardTitle === item.title
 
               return (
                 <div key={item.title || Math.random().toString()} className={`premium-card ${isEditing ? 'editing-active' : ''}`}>
@@ -383,9 +445,14 @@ function App() {
                         />
                         
                         <label>Change Cover</label>
-                        <div className="edit-file-wrapper">
+                        <div 
+                          className={`edit-file-wrapper ${isDraggingOnCard ? 'drag-active' : ''}`}
+                          onDragOver={(e) => handleDragOver(e, 'card', item.title)}
+                          onDragLeave={(e) => handleDragLeave(e, 'card')}
+                          onDrop={handleDropEdit}
+                        >
                           <label htmlFor={`edit-file-${item.title}`} className="edit-file-label">
-                            {uploading ? 'Optimizing...' : '📁 Auto-Compress & Replace'}
+                            {uploading ? 'Optimizing...' : isDraggingOnCard ? '💥 Drop It!' : '📁 Click or Drag Replacement'}
                           </label>
                           <input 
                             id={`edit-file-${item.title}`}

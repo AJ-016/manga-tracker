@@ -4,8 +4,15 @@ import imageCompression from 'browser-image-compression'
 import './App.css'
 
 function App() {
+  const [session, setSession] = useState(null)
   const [mangaList, setMangaList] = useState([])
   const [loading, setLoading] = useState(true)
+
+  // Auth States
+  const [isSignUp, setIsSignUp] = useState(false)
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authLoading, setAuthLoading] = useState(false)
 
   // Global Creation States
   const [title, setTitle] = useState('')
@@ -20,13 +27,56 @@ function App() {
   const [editFields, setEditFields] = useState({ title: '', type: '', current_chapter: 0, status: '', cover_url: '' })
 
   useEffect(() => {
-    fetchManga()
+    // Check initial auth session status
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+    })
+
+    // Listen for authentication changes (login, logout, signup)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+    })
+
+    return () => subscription.unsubscribe()
   }, [])
+
+  useEffect(() => {
+    if (session) {
+      fetchManga()
+    }
+  }, [session])
+
+  async function handleAuth(e) {
+    e.preventDefault()
+    if (!authEmail || !authPassword) return
+    try {
+      setAuthLoading(true)
+      if (isSignUp) {
+        const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword })
+        if (error) throw error
+        alert('Check your email for the confirmation link!')
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword })
+        if (error) throw error
+      }
+    } catch (error) {
+      alert(error.message)
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut()
+    setMangaList([])
+  }
 
   async function fetchManga() {
     try {
       setLoading(true)
-      const { data, error } = await supabase.from('reading_list').select('*')
+      const { data, error } = await supabase
+        .from('reading_list')
+        .select('*')
       if (error) throw error
       setMangaList(data || [])
     } catch (error) {
@@ -36,38 +86,33 @@ function App() {
     }
   }
 
-  // Utility to extract filename from Supabase storage public URL
+  // Helper: Extract unique storage filename from a public asset URL
   function getFilenameFromUrl(url) {
     if (!url || !url.includes('/storage/v1/object/public/covers/')) return null
     return url.split('/storage/v1/object/public/covers/').pop()
   }
 
-  // Utility to delete a file from Supabase Storage
+  // Helper: Hard-purge an asset from the storage bucket
   async function deleteStorageFile(filename) {
     if (!filename) return
     try {
       const { error } = await supabase.storage.from('covers').remove([filename])
       if (error) throw error
-      console.log(`Successfully purged orphaned storage asset: ${filename}`)
+      console.log(`Purged orphaned asset: ${filename}`)
     } catch (error) {
-      console.error('Failed to clean up storage file:', error.message)
+      console.error('Storage cleanup failed:', error.message)
     }
   }
 
-  // Auto-Compression and Upload Handler
+  // Compress photo and stream it into user-scoped bucket folders
   async function uploadCoverImage(file) {
     try {
       setUploading(true)
-      
-      const options = {
-        maxSizeMB: 0.05,
-        maxWidthOrHeight: 500,
-        useWebWorker: true,
-        fileType: 'image/webp'
-      }
-
+      const options = { maxSizeMB: 0.05, maxWidthOrHeight: 500, useWebWorker: true, fileType: 'image/webp' }
       const compressedFile = await imageCompression(file, options)
-      const fileName = `${Date.now()}.webp`
+      
+      // Organize storage folders by using the user's ID
+      const fileName = `${session.user.id}/${Date.now()}.webp`
 
       const { error: uploadError } = await supabase.storage
         .from('covers')
@@ -77,9 +122,8 @@ function App() {
 
       const { data } = supabase.storage.from('covers').getPublicUrl(fileName)
       return data.publicUrl
-
     } catch (error) {
-      alert('Error during optimization or upload: ' + error.message)
+      alert('Upload error: ' + error.message)
       return null
     } finally {
       setUploading(false)
@@ -89,13 +133,10 @@ function App() {
   async function handleMainFileChange(e) {
     if (!e.target.files || e.target.files.length === 0) return
     const file = e.target.files[0]
-    
-    // If the user uploads a different image *before* saving the form, clean up the previously uploaded one
     if (coverUrl) {
       const oldFilename = getFilenameFromUrl(coverUrl)
       if (oldFilename) await deleteStorageFile(oldFilename)
     }
-
     const publicUrl = await uploadCoverImage(file)
     if (publicUrl) setCoverUrl(publicUrl)
   }
@@ -103,13 +144,10 @@ function App() {
   async function handleEditFileChange(e) {
     if (!e.target.files || e.target.files.length === 0) return
     const file = e.target.files[0]
-    
-    // Clean up the previous temporary file in edit state if they keep switching it
     if (editFields.cover_url && editFields.cover_url !== mangaList.find(i => i.title === editingTitle)?.cover_url) {
       const oldFilename = getFilenameFromUrl(editFields.cover_url)
       if (oldFilename) await deleteStorageFile(oldFilename)
     }
-
     const publicUrl = await uploadCoverImage(file)
     if (publicUrl) setEditFields({ ...editFields, cover_url: publicUrl })
   }
@@ -117,7 +155,6 @@ function App() {
   async function handleAddSeries(e) {
     e.preventDefault()
     if (!title.trim()) return
-
     try {
       const { error } = await supabase.from('reading_list').insert([
         {
@@ -125,11 +162,11 @@ function App() {
           type,
           current_chapter: parseFloat(chapter) || 0,
           status,
-          cover_url: coverUrl || null
+          cover_url: coverUrl || null,
+          user_id: session.user.id // Assigns row ownership to current user profile ID
         }
       ])
       if (error) throw error
-
       setTitle('')
       setCoverUrl('')
       setChapter('1')
@@ -141,18 +178,12 @@ function App() {
 
   async function stepChapter(seriesTitle, currentCh, amount) {
     const targetCh = Math.max(0, currentCh + amount)
-    setMangaList(prev => prev.map(item => 
-      item.title === seriesTitle ? { ...item, current_chapter: targetCh } : item
-    ))
-
+    setMangaList(prev => prev.map(item => item.title === seriesTitle ? { ...item, current_chapter: targetCh } : item))
     try {
-      const { error } = await supabase
-        .from('reading_list')
-        .update({ current_chapter: targetCh })
-        .eq('title', seriesTitle)
+      const { error } = await supabase.from('reading_list').update({ current_chapter: targetCh }).eq('title', seriesTitle)
       if (error) throw error
     } catch (error) {
-      console.error('Database write failed:', error.message)
+      console.error('Chapter update failed:', error.message)
     }
   }
 
@@ -169,11 +200,8 @@ function App() {
 
   async function handleSaveEdits(originalTitle) {
     if (!editFields.title.trim()) return
-
     try {
       const originalItem = mangaList.find(item => item.title === originalTitle)
-      
-      // Garbage collection: If the cover was updated/replaced, drop the old file out of storage completely
       if (originalItem && originalItem.cover_url && originalItem.cover_url !== editFields.cover_url) {
         const fileToPurge = getFilenameFromUrl(originalItem.cover_url)
         if (fileToPurge) await deleteStorageFile(fileToPurge)
@@ -191,39 +219,76 @@ function App() {
         .eq('title', originalTitle)
 
       if (error) throw error
-
       setEditingTitle(null)
       fetchManga()
     } catch (error) {
-      console.error('Error saving records:', error.message)
+      console.error('Edit transaction failure:', error.message)
     }
   }
 
   async function deleteSeries(seriesTitle) {
-    if (!window.confirm(`Remove "${seriesTitle}"?`)) return
+    if (!window.confirm(`Remove "${seriesTitle}" from your list?`)) return
     try {
       const targetItem = mangaList.find(item => item.title === seriesTitle)
-      
-      // Garbage collection: Purge image asset out of bucket when dropping its tracking entry completely
       if (targetItem && targetItem.cover_url) {
         const fileToPurge = getFilenameFromUrl(targetItem.cover_url)
         if (fileToPurge) await deleteStorageFile(fileToPurge)
       }
-
       const { error } = await supabase.from('reading_list').delete().eq('title', seriesTitle)
       if (error) throw error
       setMangaList(prev => prev.filter(item => item.title !== seriesTitle))
     } catch (error) {
-      console.error('Error deleting series:', error.message)
+      console.error('Deletion failure:', error.message)
     }
+  }
+
+  // Auth Gateway View
+  if (!session) {
+    return (
+      <div className="auth-wrapper">
+        <div className="auth-card">
+          <h2>NEXUS<span>LIST</span></h2>
+          <p>{isSignUp ? 'Create your tracker account' : 'Sign in to access your shelf'}</p>
+          <form onSubmit={handleAuth} className="auth-form-body">
+            <input 
+              type="email" 
+              placeholder="Email Address" 
+              value={authEmail} 
+              onChange={(e) => setAuthEmail(e.target.value)} 
+              required 
+            />
+            <input 
+              type="password" 
+              placeholder="Password" 
+              value={authPassword} 
+              onChange={(e) => setAuthPassword(e.target.value)} 
+              required 
+            />
+            <button type="submit" disabled={authLoading}>
+              {authLoading ? 'Verifying...' : isSignUp ? 'Create Account' : 'Sign In'}
+            </button>
+          </form>
+          <p className="auth-toggle-text">
+            {isSignUp ? 'Already tracking? ' : "Don't have an account? "}
+            <span onClick={() => setIsSignUp(!isSignUp)}>
+              {isSignUp ? 'Sign In instead' : 'Create an Account'}
+            </span>
+          </p>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="app-container">
-      <header className="main-header">
+      <header className="main-header user-header-layout">
         <div className="logo-section">
           <h1>NEXUS<span>LIST</span></h1>
           <p>Manga • Manhua • Manhwa Dashboard</p>
+        </div>
+        <div className="user-badge-profile">
+          <span className="user-email">{session.user.email}</span>
+          <button onClick={handleLogout} className="logout-action-btn">Log Out</button>
         </div>
       </header>
 
